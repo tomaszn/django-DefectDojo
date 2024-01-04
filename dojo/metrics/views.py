@@ -14,7 +14,7 @@ from django.core.exceptions import PermissionDenied
 from django.urls import reverse
 from django.db.models import Q, Sum, Case, When, IntegerField, Value, Count
 from django.db.models.query import QuerySet
-from django.http import HttpResponseRedirect
+from django.http import HttpRequest, HttpResponseRedirect
 from django.shortcuts import render, get_object_or_404
 from django.utils.html import escape
 from django.views.decorators.cache import cache_page
@@ -45,7 +45,7 @@ generic metrics method
 """
 
 
-def critical_product_metrics(request, mtype):
+def critical_product_metrics(request: HttpRequest, mtype):
     template = 'dojo/metrics.html'
     page_name = _('Critical Product Metrics')
     critical_products = get_authorized_product_types(Permissions.Product_Type_View)
@@ -107,7 +107,7 @@ def severity_count(queryset, method, expression):
     )
 
 
-def identify_view(request):
+def identify_view(request: HttpRequest):
     get_data = request.GET
     view = get_data.get('type', None)
     if view:
@@ -125,7 +125,7 @@ def identify_view(request):
     return 'Finding'
 
 
-def finding_querys(prod_type, request):
+def finding_querys(prod_type, request: HttpRequest):
     findings_query = Finding.objects.filter(
         verified=True,
         severity__in=('Critical', 'High', 'Medium', 'Low', 'Info')
@@ -221,7 +221,7 @@ def finding_querys(prod_type, request):
     }
 
 
-def endpoint_querys(prod_type, request):
+def endpoint_querys(prod_type, request: HttpRequest):
     endpoints_query = Endpoint_Status.objects.filter(mitigated=False,
                                       finding__severity__in=('Critical', 'High', 'Medium', 'Low', 'Info')).prefetch_related(
         'finding__test__engagement__product',
@@ -379,7 +379,7 @@ def get_closed_in_period_details(findings):
 
 @cache_page(60 * 5)  # cache for 5 minutes
 @vary_on_cookie
-def metrics(request, mtype):
+def metrics(request: HttpRequest, mtype):
     template = 'dojo/metrics.html'
     show_pt_filter = True
     view = identify_view(request)
@@ -467,7 +467,7 @@ simple metrics for easy reporting
 
 @cache_page(60 * 5)  # cache for 5 minutes
 @vary_on_cookie
-def simple_metrics(request):
+def simple_metrics(request: HttpRequest):
     page_name = _('Simple Metrics')
     now = timezone.now()
 
@@ -548,7 +548,7 @@ def simple_metrics(request):
 
 # @cache_page(60 * 5)  # cache for 5 minutes
 # @vary_on_cookie
-def product_type_counts(request):
+def product_type_counts(request: HttpRequest):
     form = ProductTypeCountsForm()
     opened_in_period_list = []
     oip = None
@@ -698,7 +698,7 @@ def product_type_counts(request):
                   )
 
 
-def product_tag_counts(request):
+def product_tag_counts(request: HttpRequest):
     form = ProductTagCountsForm()
     opened_in_period_list = []
     oip = None
@@ -857,7 +857,7 @@ def product_tag_counts(request):
                   )
 
 
-def engineer_metrics(request):
+def engineer_metrics(request: HttpRequest):
     # only superusers can select other users to view
     if request.user.is_superuser:
         users = Dojo_User.objects.all().order_by('username')
@@ -887,7 +887,7 @@ and root can view others metrics
 # noinspection DjangoOrm
 @cache_page(60 * 5)  # cache for 5 minutes
 @vary_on_cookie
-def view_engineer(request, eid):
+def view_engineer(request: HttpRequest, eid):
     user = get_object_or_404(Dojo_User, pk=eid)
     if not (request.user.is_superuser or
             request.user.username == user.username):
