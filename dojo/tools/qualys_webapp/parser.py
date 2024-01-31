@@ -9,13 +9,13 @@ from datetime import datetime
 from dojo.models import Endpoint, Finding
 
 try:
-    from dojo.settings.settings import QUALYS_WAS_WEAKNESS_IS_VULN
+    from django.conf.settings import QUALYS_WAS_WEAKNESS_IS_VULN
 except ImportError:
     # Avoid breaking change
     QUALYS_WAS_WEAKNESS_IS_VULN = False
 
 try:
-    from dojo.settings.settings import QUALYS_WAS_UNIQUE_ID
+    from django.conf.settings import QUALYS_WAS_UNIQUE_ID
 except ImportError:
     # Avoid breaking change
     QUALYS_WAS_UNIQUE_ID = False
@@ -193,7 +193,6 @@ def get_unique_vulnerabilities(
     # Iterate through all vulnerabilites to pull necessary info
     for vuln in vulnerabilities:
         urls = []
-        requests = response = ""
         qid = int(vuln.findtext("QID"))
         url = vuln.findtext("URL")
         if url is not None:
@@ -261,7 +260,6 @@ def get_vulnerabilities(
     # Iterate through all vulnerabilites to pull necessary info
     for vuln in vulnerabilities:
         urls = []
-        requests = response = ""
         qid = int(vuln.findtext("QID"))
         url = vuln.findtext("URL")
         if url is not None:

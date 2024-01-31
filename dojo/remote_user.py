@@ -4,7 +4,7 @@ from django.contrib.auth.backends import RemoteUserBackend as OriginalRemoteUser
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from rest_framework.authentication import RemoteUserAuthentication as OriginalRemoteUserAuthentication
 from netaddr import IPAddress
-from dojo.settings import settings
+from django.conf import settings
 from dojo.pipeline import assign_user_to_groups, cleanup_old_groups_for_user
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,9 @@ class RemoteUserAuthentication(OriginalRemoteUserAuthentication):
 
 class RemoteUserMiddleware(OriginalRemoteUserMiddleware):
     def process_request(self, request):
+        if not settings.AUTH_REMOTEUSER_ENABLED:
+            return
+
         # process only if request is comming from the trusted proxy node
         if IPAddress(request.META['REMOTE_ADDR']) in settings.AUTH_REMOTEUSER_TRUSTED_PROXY:
             self.header = settings.AUTH_REMOTEUSER_USERNAME_HEADER

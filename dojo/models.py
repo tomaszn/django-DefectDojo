@@ -37,7 +37,6 @@ import tagulous.admin
 from django.db.models import JSONField
 import hyperlink
 from cvss import CVSS3
-from dojo.settings.settings import SLA_BUSINESS_DAYS
 
 
 logger = logging.getLogger(__name__)
@@ -271,23 +270,14 @@ class Role(models.Model):
 
 
 class System_Settings(models.Model):
-    enable_auditlog = models.BooleanField(
-        default=True,
-        blank=False,
-        verbose_name=_('Enable audit logging'),
-        help_text=_("With this setting turned on, Dojo maintains an audit log "
-                  "of changes made to entities (Findings, Tests, Engagements, Procuts, ...)"
-                  "If you run big import you may want to disable this "
-                  "because the way django-auditlog currently works, there's a "
-                  "big performance hit. Especially during (re-)imports."))
     enable_deduplication = models.BooleanField(
         default=False,
         blank=False,
         verbose_name=_('Deduplicate findings'),
-        help_text=_("With this setting turned on, Dojo deduplicates findings by "
+        help_text=_("With this setting turned on, DefectDojo deduplicates findings by "
                   "comparing endpoints, cwe fields, and titles. "
                   "If two findings share a URL and have the same CWE or "
-                  "title, Dojo marks the less recent finding as a duplicate. "
+                  "title, DefectDojo marks the recent finding as a duplicate. "
                   "When deduplication is enabled, a list of "
                   "deduplicated findings is added to the engagement view."))
     delete_duplicates = models.BooleanField(default=False, blank=False, help_text=_("Requires next setting: maximum number of duplicates to retain."))
@@ -1716,7 +1706,6 @@ class Endpoint(models.Model):
             mitigated__isnull=True,
             false_p=False,
             duplicate=False,
-            status_finding__mitigated=False,
             status_finding__false_positive=False,
             status_finding__out_of_scope=False,
             status_finding__risk_accepted=False
@@ -1731,7 +1720,6 @@ class Endpoint(models.Model):
             mitigated__isnull=True,
             false_p=False,
             duplicate=False,
-            status_finding__mitigated=False,
             status_finding__false_positive=False,
             status_finding__out_of_scope=False,
             status_finding__risk_accepted=False
@@ -1786,7 +1774,6 @@ class Endpoint(models.Model):
             mitigated__isnull=True,
             false_p=False,
             duplicate=False,
-            status_finding__mitigated=False,
             status_finding__false_positive=False,
             status_finding__out_of_scope=False,
             status_finding__risk_accepted=False,
@@ -1802,7 +1789,6 @@ class Endpoint(models.Model):
             mitigated__isnull=True,
             false_p=False,
             duplicate=False,
-            status_finding__mitigated=False,
             status_finding__false_positive=False,
             status_finding__out_of_scope=False,
             status_finding__risk_accepted=False,
@@ -1828,6 +1814,9 @@ class Endpoint(models.Model):
     def from_uri(uri):
         try:
             url = hyperlink.parse(url=uri)
+        except UnicodeDecodeError:
+            from urllib.parse import urlparse
+            url = hyperlink.parse(url="//" + urlparse(uri).netloc)
         except hyperlink.URLParseError as e:
             raise ValidationError('Invalid URL format: {}'.format(e))
 
@@ -2332,7 +2321,7 @@ class Finding(models.Model):
                                  help_text=_('Identified file(s) containing the flaw.'))
     component_name = models.CharField(null=True,
                                       blank=True,
-                                      max_length=200,
+                                      max_length=500,
                                       verbose_name=_('Component name'),
                                       help_text=_('Name of the affected component (library name, part of a system, ...).'))
     component_version = models.CharField(null=True,
@@ -2563,7 +2552,7 @@ class Finding(models.Model):
 
         # Make sure that we have a cwe if we need one
         if self.cwe == 0 and not self.test.hash_code_allows_null_cwe:
-            deduplicationLogger.warn(
+            deduplicationLogger.warning(
                 "Cannot compute hash_code based on configured fields because cwe is 0 for finding of title '" + self.title + "' found in file '" + str(self.file_path) +
                 "'. Fallback to legacy mode for this finding.")
             return self.compute_hash_code_legacy()
@@ -2762,7 +2751,7 @@ class Finding(models.Model):
 
     def _age(self, start_date):
         from dojo.utils import get_work_days
-        if SLA_BUSINESS_DAYS:
+        if settings.SLA_BUSINESS_DAYS:
             if self.mitigated:
                 days = get_work_days(self.date, self.mitigated.date())
             else:
@@ -2821,7 +2810,8 @@ class Finding(models.Model):
 
     def has_github_issue(self):
         try:
-            issue = self.github_issue
+            # Attempt to access the github issue if it exists. If not, an exception will be caught
+            _ = self.github_issue
             return True
         except GITHUB_Issue.DoesNotExist:
             return False
@@ -3034,26 +3024,125 @@ class Finding(models.Model):
         link = self.get_file_path_with_raw_link()
         return create_bleached_link(link, self.file_path)
 
+    def get_scm_type(self):
+        # extract scm type from product custom field 'scm-type'
+
+        if hasattr(self.test.engagement, 'product'):
+            dojo_meta = DojoMeta.objects.filter(product=self.test.engagement.product, name='scm-type').first()
+            if dojo_meta:
+                st = dojo_meta.value.strip()
+                if st:
+                    return st.lower()
+        return 'github'
+
+    def bitbucket_public_prepare_scm_base_link(self, uri):
+        # bitbucket public (https://bitbucket.org) url template for browse is:
+        # https://bitbucket.org/<username>/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bitbucket.org/<username>/<repository-slug>.git
+        # so to create browser url - git url should be recomposed like below:
+
+        parts_uri = uri.split('.git')
+        return parts_uri[0]
+
+    def bitbucket_public_prepare_scm_link(self, uri):
+        # if commit hash or branch/tag is set for engagement/test -
+        # hash or branch/tag should be appended to base browser link
+
+        link = self.bitbucket_public_prepare_scm_base_link(uri)
+        if self.test.commit_hash:
+            link += '/src/' + self.test.commit_hash + '/' + self.file_path
+        elif self.test.engagement.commit_hash:
+            link += '/src/' + self.test.engagement.commit_hash + '/' + self.file_path
+        elif self.test.branch_tag:
+            link += '/src/' + self.test.branch_tag + '/' + self.file_path
+        elif self.test.engagement.branch_tag:
+            link += '/src/' + self.test.engagement.branch_tag + '/' + self.file_path
+        else:
+            link += '/src/master/' + self.file_path
+
+        return link
+
+    def bitbucket_standalone_prepare_scm_base_link(self, uri):
+        # bitbucket onpremise/standalone url template for browse is:
+        # https://bb.example.com/projects/<project-key>/repos/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bb.example.com/scm/<project-key>/<repository-slug>.git
+        # or for user public repo^
+        # https://bb.example.com/users/<username>/repos/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bb.example.com/scm/<username>/<repository-slug>.git (username often could be prefixed with ~)
+        # so to create borwser url - git url should be recomposed like below:
+
+        parts_uri = uri.split('.git')
+        parts_scm = parts_uri[0].split('/scm/')
+        parts_project = parts_scm[1].split('/')
+        project = parts_project[0]
+        if project.startswith('~'):
+            return parts_scm[0] + '/users/' + parts_project[0][1:] + '/repos/' + parts_project[1] + '/browse'
+        else:
+            return parts_scm[0] + '/projects/' + parts_project[0] + '/repos/' + parts_project[1] + '/browse'
+
+    def bitbucket_standalone_prepare_scm_link(self, uri):
+        # if commit hash or branch/tag is set for engagement/test -
+        # hash or barnch/tag should be appended to base browser link
+
+        link = self.bitbucket_standalone_prepare_scm_base_link(uri)
+        if self.test.commit_hash:
+            link += '/' + self.file_path + '?at=' + self.test.commit_hash
+        elif self.test.engagement.commit_hash:
+            link += '/' + self.file_path + '?at=' + self.test.engagement.commit_hash
+        elif self.test.branch_tag:
+            link += '/' + self.file_path + '?at=' + self.test.branch_tag
+        elif self.test.engagement.branch_tag:
+            link += '/' + self.file_path + '?at=' + self.test.engagement.branch_tag
+        else:
+            link += '/' + self.file_path
+
+        return link
+
+    def github_prepare_scm_link(self, uri):
+        link = uri
+
+        if self.test.commit_hash:
+            link += '/blob/' + self.test.commit_hash + '/' + self.file_path
+        elif self.test.engagement.commit_hash:
+            link += '/blob/' + self.test.engagement.commit_hash + '/' + self.file_path
+        elif self.test.branch_tag:
+            link += '/blob/' + self.test.branch_tag + '/' + self.file_path
+        elif self.test.engagement.branch_tag:
+            link += '/blob/' + self.test.engagement.branch_tag + '/' + self.file_path
+        else:
+            link += '/' + self.file_path
+
+        return link
+
     def get_file_path_with_raw_link(self):
         if self.file_path is None:
             return None
+
         link = self.test.engagement.source_code_management_uri
-        if (self.test.engagement.source_code_management_uri is not None
-                and "https://github.com/" in self.test.engagement.source_code_management_uri):
-            if self.test.commit_hash:
-                link += '/blob/' + self.test.commit_hash + '/' + self.file_path
-            elif self.test.engagement.commit_hash:
-                link += '/blob/' + self.test.engagement.commit_hash + '/' + self.file_path
-            elif self.test.branch_tag:
-                link += '/blob/' + self.test.branch_tag + '/' + self.file_path
-            elif self.test.engagement.branch_tag:
-                link += '/blob/' + self.test.engagement.branch_tag + '/' + self.file_path
+        scm_type = self.get_scm_type()
+        if (self.test.engagement.source_code_management_uri is not None):
+            if scm_type == 'github' or ("https://github.com/" in self.test.engagement.source_code_management_uri):
+                link = self.github_prepare_scm_link(link)
+            elif scm_type == 'bitbucket-standalone':
+                link = self.bitbucket_standalone_prepare_scm_link(link)
+            elif scm_type == 'bitbucket':
+                link = self.bitbucket_public_prepare_scm_link(link)
             else:
                 link += '/' + self.file_path
         else:
             link += '/' + self.file_path
+
+        # than - add line part to browser url
         if self.line:
-            link = link + '#L' + str(self.line)
+            if scm_type == 'github' or scm_type == 'gitlab':
+                link = link + '#L' + str(self.line)
+            elif scm_type == 'bitbucket-standalone':
+                link = link + '#' + str(self.line)
+            elif scm_type == 'bitbucket':
+                link = link + '#lines-' + str(self.line)
         return link
 
     def get_references_with_links(self):
@@ -3509,9 +3598,14 @@ class Announcement(models.Model):
     message = models.CharField(max_length=500,
                                 help_text=_("This dismissable message will be displayed on all pages for authenticated users. It can contain basic html tags, for example <a href='https://www.fred.com' style='color: #337ab7;' target='_blank'>https://example.com</a>"),
                                 default='')
-    dismissable = models.BooleanField(default=False, null=True, blank=True)
     style = models.CharField(max_length=64, choices=ANNOUNCEMENT_STYLE_CHOICES, default='info',
                             help_text=_("The style of banner to display. (info, success, warning, danger)"))
+    dismissable = models.BooleanField(default=False,
+                                      null=False,
+                                      blank=True,
+                                      verbose_name=_('Dismissable?'),
+                                      help_text=_('Ticking this box allows users to dismiss the current announcement'),
+                                      )
 
 
 class UserAnnouncement(models.Model):
@@ -3795,6 +3889,9 @@ class Notifications(models.Model):
     risk_acceptance_expiration = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True,
         verbose_name=_('Risk Acceptance Expiration'),
         help_text=_('Get notified of (upcoming) Risk Acceptance expiries'))
+    sla_breach_combined = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True,
+        verbose_name=_('SLA breach (combined)'),
+        help_text=_('Get notified of (upcoming) SLA breaches (a message per project)'))
 
     class Meta:
         constraints = [
@@ -3834,9 +3931,22 @@ class Notifications(models.Model):
                 result.review_requested = merge_sets_safe(result.review_requested, notifications.review_requested)
                 result.other = merge_sets_safe(result.other, notifications.other)
                 result.sla_breach = merge_sets_safe(result.sla_breach, notifications.sla_breach)
+                result.sla_breach_combined = merge_sets_safe(result.sla_breach_combined, notifications.sla_breach_combined)
                 result.risk_acceptance_expiration = merge_sets_safe(result.risk_acceptance_expiration, notifications.risk_acceptance_expiration)
 
         return result
+
+    def __str__(self):
+        return f"Notifications about {self.product or 'all projects'} for {self.user or 'system notifications'}"
+
+
+class NotificationsAdmin(admin.ModelAdmin):
+    list_filter = ('user', 'product')
+
+    def get_list_display(self, request):
+        list_fields = ['user', 'product']
+        list_fields += [field.name for field in self.model._meta.fields if field.name not in list_fields]
+        return list_fields
 
 
 class Tool_Product_Settings(models.Model):
@@ -4289,36 +4399,21 @@ class ChoiceAnswer(Answer):
             return 'No Response'
 
 
-def enable_disable_auditlog(enable=True):
-    if enable:
-        # Register for automatic logging to database
-        logger.info('enabling audit logging')
-        auditlog.register(Dojo_User, exclude_fields=['password'])
-        auditlog.register(Endpoint)
-        auditlog.register(Engagement)
-        auditlog.register(Finding)
-        auditlog.register(Product_Type)
-        auditlog.register(Product)
-        auditlog.register(Test)
-        auditlog.register(Risk_Acceptance)
-        auditlog.register(Finding_Template)
-        auditlog.register(Cred_User, exclude_fields=['password'])
-    else:
-        logger.info('disabling audit logging')
-        auditlog.unregister(Dojo_User)
-        auditlog.unregister(Endpoint)
-        auditlog.unregister(Engagement)
-        auditlog.unregister(Finding)
-        auditlog.unregister(Product_Type)
-        auditlog.unregister(Product)
-        auditlog.unregister(Test)
-        auditlog.unregister(Risk_Acceptance)
-        auditlog.unregister(Finding_Template)
-        auditlog.unregister(Cred_User)
+if settings.ENABLE_AUDITLOG:
+    # Register for automatic logging to database
+    logger.info('enabling audit logging')
+    auditlog.register(Dojo_User, exclude_fields=['password'])
+    auditlog.register(Endpoint)
+    auditlog.register(Engagement)
+    auditlog.register(Finding)
+    auditlog.register(Product_Type)
+    auditlog.register(Product)
+    auditlog.register(Test)
+    auditlog.register(Risk_Acceptance)
+    auditlog.register(Finding_Template)
+    auditlog.register(Cred_User, exclude_fields=['password'])
 
-
-from dojo.utils import calculate_grade, get_system_setting, to_str_typed
-enable_disable_auditlog(enable=get_system_setting('enable_auditlog'))  # on startup choose safe to retrieve system settiung)
+from dojo.utils import calculate_grade, to_str_typed
 
 tagulous.admin.register(Product.tags)
 tagulous.admin.register(Test.tags)
@@ -4414,7 +4509,7 @@ admin.site.register(BurpRawRequestResponse)
 admin.site.register(Announcement)
 admin.site.register(UserAnnouncement)
 admin.site.register(BannerConf)
-admin.site.register(Notifications)
+admin.site.register(Notifications, NotificationsAdmin)
 admin.site.register(Tool_Product_History)
 admin.site.register(General_Survey)
 admin.site.register(Test_Import)
